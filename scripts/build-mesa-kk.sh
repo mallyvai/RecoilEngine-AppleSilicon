@@ -123,7 +123,47 @@ for p in $(patch_list); do
   git apply --whitespace=nowarn "$p" || { echo "FATAL: patch $(basename "$p") did not apply to $MESA_COMMIT"; exit 1; }
 done
 
-python3 -m venv "$DEPS/mesa-venv"
+# Mesa's meson needs python >= 3.10 while Apple's /usr/bin/python3 is 3.9. The
+# venv inherits whichever interpreter creates it and is put first on PATH
+# below, so a 3.9-created venv shadows a newer python and meson fails with
+# "Python >= 3.10 not found" on a machine that has one installed. The error
+# names the requirement but not the cause, so it reads as a missing dependency
+# and `brew install python@3.13` does not clear it.
+#
+# Delete BEFORE choosing an interpreter: anyone who has already hit this has a
+# 3.9 venv in deps/, and resolving first can resolve INTO the venv we are about
+# to remove (a shell with it activated), leaving a path that no longer exists.
+rm -rf "$DEPS/mesa-venv"
+
+# Candidates, best first: every pythonX.Y on PATH newest-first, then the plain
+# names. ASK each one its version rather than trusting its name -- `python3`
+# may itself already be >= 3.10, and on such a machine the old line worked, so
+# rejecting it on the absence of a versioned alias would be a regression.
+_cands="$(
+  printf '%s\n' "${PATH//:/$'\n'}" | while IFS= read -r _d; do
+    [ -n "$_d" ] && [ -d "$_d" ] || continue
+    for _f in "$_d"/python3.[0-9] "$_d"/python3.[0-9][0-9]; do
+      [ -x "$_f" ] && basename "$_f"
+    done
+  done | sort -u -t. -k2,2rn
+)" || true
+
+MESA_VENV_PY=""
+for _c in $_cands python3 python; do
+  command -v "$_c" >/dev/null 2>&1 || continue
+  "$_c" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' \
+    >/dev/null 2>&1 || continue
+  MESA_VENV_PY="$(command -v "$_c")"; break
+done
+test -n "$MESA_VENV_PY" || {
+  echo "FATAL: the Mesa build needs python >= 3.10 and none was found on PATH."
+  echo "       python3 is $(python3 -V 2>&1 || echo absent)."
+  echo "       Install one (e.g. brew install python@3.13) or put any"
+  echo "       python >= 3.10 on PATH."
+  exit 1
+}
+echo "mesa: venv python $MESA_VENV_PY ($("$MESA_VENV_PY" -V 2>&1 | awk '{print $2}'))"
+"$MESA_VENV_PY" -m venv "$DEPS/mesa-venv"
 "$DEPS/mesa-venv/bin/pip" install --quiet mako pyyaml packaging
 
 # Reproducibility: strip the absolute build-root prefix ($BAR, which
